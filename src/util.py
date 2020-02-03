@@ -13,7 +13,7 @@ def train_test_val(x, y, test_size: float, val_size: float):
 
     test_plus_val_size = test_size + val_size
     x_train, x_test_val, y_train, y_test_val = train_test_split(x, y, test_size=test_plus_val_size)
-    x_test, x_val, y_test, y_val = train_test_split(x_test_val, y_test_val, test_size=val_size / test_plus_val_size)
+    x_val, x_test, y_val, y_test = train_test_split(x_test_val, y_test_val, test_size=test_size / test_plus_val_size)
 
     return x_train, y_train, x_test, y_test, x_val, y_val
 
