@@ -14,11 +14,11 @@ class PredictionConsumer:
         self.url = self.url_fmt.format(host=self.host, port=self.port, version=self.version, model_name=self.model_name)
 
     def predict(self, array: np.ndarray) -> np.ndarray:
-        r = requests.post(self.url, json=self._get_prediction_dict(array))
+        headers = {"content-type": "application/json"}
+        r = requests.post(self.url, json=self._get_prediction_dict(array), headers=headers)
         if r.status_code == requests.codes.ok:
             return np.array(r.json()['predictions'])
-
-        raise Exception('No prediction returned.')
+        raise Exception(f'No prediction returned. {r.json()["error"]}')
 
     @staticmethod
     def _get_prediction_dict(array: np.ndarray) -> dict:
