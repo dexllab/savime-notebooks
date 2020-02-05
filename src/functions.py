@@ -7,9 +7,10 @@ def f_x(x: np.ndarray, mean=0, std=.1) -> np.ndarray:
 
 
 @jit(nopython=True)
-def f2_x(x: np.ndarray, low: float, high: float, num_partitions: int, mean=0, std=2) -> np.ndarray:
+def f2_x(x: np.ndarray, low: float, high: float, num_partitions: int, mean=0, std=2,
+         alpha_min=1, alpha_max=5) -> np.ndarray:
     interval_points = np.linspace(low, high, num_partitions + 1)[1:]
-    alphas = np.linspace(1, 3, num_partitions)
+    alphas = np.linspace(alpha_min, alpha_max, num_partitions)
     alpha_matrix = np.ones(x.shape)
 
     for i in range(x.shape[0]):
