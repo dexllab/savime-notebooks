@@ -100,6 +100,7 @@ class ModelInterface(ABC):
         self._assert_validation(val_split, x_val, y_val)
         if not self.is_compiled:
             self.compile()
+            self.is_compiled = True
 
         kwargs = dict(batch_size=self._fit_batch_size, epochs=self._fit_epochs, callbacks=self._fit_callbacks,
                       verbose=self._fit_verbosity)
