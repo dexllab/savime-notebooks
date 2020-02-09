@@ -18,5 +18,5 @@ def f2_x(x: np.ndarray, low: float, high: float, num_partitions: int, mean=0, st
             alpha_ix = np.argmax(x[i].reshape(-1, 1) <= interval_points)
             alpha_matrix[i][j] = alphas[alpha_ix]
 
-    y = np.sum(x * alpha_matrix, axis=1) + np.random.normal(mean, std)
+    y = np.sum(x * alpha_matrix, axis=1) + np.random.normal(mean, std, size=x.shape[0])
     return y

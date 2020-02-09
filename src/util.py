@@ -10,10 +10,13 @@ import tqdm
 from typing import Sequence, Tuple
 
 
-def plot_heatmap(matrix, title, x_label, y_label, ax=None):
+def plot_heatmap(matrix, title, x_label, y_label, ax=None, heatmap_kwargs: dict = None):
     if ax is None:
         ax = plt.axes()
-    sns.heatmap(matrix, ax=ax, linewidths=.1, cmap='YlGnBu')
+    if heatmap_kwargs is None:
+        heatmap_kwargs = {}
+
+    sns.heatmap(matrix, ax=ax, **heatmap_kwargs)
     ax.set_title(title)
     ax.set_xlabel(x_label)
     ax.set_ylabel(y_label)

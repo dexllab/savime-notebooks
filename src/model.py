@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+import itertools
 import json
 import os
 from typing import Callable, ClassVar, List, Union
@@ -6,6 +7,8 @@ from typing import Callable, ClassVar, List, Union
 from src.util import *
 
 from tensorflow.keras.layers import BatchNormalization, ConvLSTM2D, Conv3D
+
+from tqdm.notebook import tqdm as progress_bar
 
 
 class MetricMatrixAndArray:
@@ -55,6 +58,8 @@ class ModelInterface(ABC):
         self._metrics_names_with_val_and_loss.extend(['loss', 'val_loss'])
         self._fit_metric_watcher = MetricWatcher(self._metrics_names_with_val_and_loss)
         self._fit_callbacks = [self._fit_metric_watcher]
+
+        self.iid = None
 
         early_stopping_config = {}
         if early_stopping_min_delta is not None:
@@ -212,10 +217,6 @@ class KerasArima(tf.keras.Model):
 
     @tf.function
     def _y_t(self, x_t, x_t_min_1, y_t_min_1, y_t_min_2):
-        """
-        .. math::
-            y_t = x_t + u + \phi * (x_t - x_{t-1}) - \theta_1 * (x_t - y_{t - 1} - \theta_2 * (x_{t-1} - y_{t-2}, t > 2
-        """
         return x_t + self.u + self.phi * (x_t - x_t_min_1) - self.theta_1 * (x_t - y_t_min_1) - \
                self.theta_2 * (x_t_min_1 - y_t_min_2)
 
@@ -272,7 +273,7 @@ class ElasticNet(ModelInterface):
 
 
 class ModelFactory:
-    model_name_formatter = '{prefix}_{id}'
+    _model_name_formatter = '{prefix}_{id}'
 
     def __init__(self, model_class: ClassVar, x: np.ndarray, f_x: Union[Callable, np.ndarray], num_models: int,
                  test_size: float, val_size: float, model_name_prefix: str, f_kwargs: dict = None,
@@ -288,13 +289,14 @@ class ModelFactory:
         else:
             self._y = f_x
 
-        self._num_models = num_models
+        self._num_partition_models = num_models
+        self._num_partitions = num_models
         self._model_name_prefix = model_name_prefix
         self._test_size = test_size
         self._val_size = val_size
 
-        self._x_splitter = ArraySplitter(self._x, self._num_models, axis=x_split_axis)
-        self._y_splitter = ArraySplitter(self._y, self._num_models, axis=y_split_axis)
+        self._x_splitter = ArraySplitter(self._x, self._num_partitions, axis=x_split_axis)
+        self._y_splitter = ArraySplitter(self._y, self._num_partitions, axis=y_split_axis)
 
         self._train_val_test_splitter = train_val_test_splitter
 
@@ -303,57 +305,104 @@ class ModelFactory:
         self._x_split_indices = None
         self._y_split_indices = None
 
-        self._test_data = []
-        self._models: List[ModelInterface] = []
+        self._partition_test_data = []
+        self._test_data = None
+
+        self._partition_models: List[ModelInterface] = []
+        self._model: ModelInterface = None
+        self._all_models_iterator = None
+
 
     def _split(self):
         self._x_split, self._x_split_indices = self._x_splitter()
         self._y_split, self._y_split_indices = self._y_splitter()
 
     def build_models(self):
-        for i in tqdm.tqdm(range(self._num_models), desc='Building models'):
-            name = self.model_name_formatter.format(prefix=self._model_name_prefix, id=i)
-            model = self._model_class(name=name, **self._model_kwargs)
-            model.compile()
-            self._models.append(model)
+        """
+        Instantiate and call the build model for each model.
+        """
+        def instantiate_and_compile(model_name):
+            model_ = self._model_class(name=model_name, **self._model_kwargs)
+            model_.compile()
+            return model_
+
+        for i in progress_bar(range(self._num_partition_models), desc='Building models'):
+            name = self._model_name_formatter.format(prefix=self._model_name_prefix, id=i)
+            model = instantiate_and_compile(name)
+            model.iid = i
+            self._partition_models.append(model)
+
+        name = self._model_name_formatter.format(prefix=self._model_name_prefix, id=self._num_partition_models)
+        self._model = instantiate_and_compile(name)
+        self._model.iid = self._num_partition_models
+
+        self._all_models_iterator = lambda: itertools.chain(self._partition_models, [self._model])
 
     def fit_models(self):
-        self._split()
-        for model_i, x_i, y_i in tqdm.tqdm(zip(self._models, self._x_split, self._y_split), desc='Training models'):
-            x_i_train, y_i_train, x_i_val, y_i_val, x_i_test, y_i_test = \
-                self._train_val_test_splitter(x_i, y_i, val_size=self._val_size, test_size=self._test_size)
-            self._test_data.append((x_i_test, y_i_test))
-            model_i.fit(x_i_train, y_i_train, x_val=x_i_val, y_val=y_i_val)
+        """
+        Iteratively fit each model in its partition.
+        """
 
-    def get_mean_squared_error_matrix(self):
-        return get_mean_squared_error_matrix(models=self._models, x_split=self._x_split, y_split=self._y_split)
+        self._split()
+        for model_i, x_i, y_i in \
+                progress_bar(zip(self._partition_models, self._x_split, self._y_split), desc='Training models by'
+                                                                                             ' partition'):
+            self._fit(model_i, x_i, y_i)
+
+        for model in progress_bar([self._model], desc='Training a model in the whole domain'):
+            self._fit(model, self._x, self._y, is_a_model_for_partition=False)
+
+    def _fit(self, model: ModelInterface, x, y, is_a_model_for_partition=True):
+        """
+        Fit each model
+
+        :model: The model to be fit.
+        :x: The model input.
+        :y: The model output.
+        :is_a_model_for_partition: If the current model is being trained on a partition (True) or not (False).
+        """
+        x_train, y_train, x_val, y_val, x_test, y_test = self._train_val_test_splitter(x, y,
+                                                                                       val_size=self._val_size,
+                                                                                       test_size=self._test_size)
+        model.fit(x, y, x_val=x_val, y_val=y_val)
+
+        if is_a_model_for_partition:
+            self._partition_test_data.append((x_test, y_test))
+        else:
+            self._test_data = (x_test, y_test)
 
     def get_metric_info(self, use_test_data: bool = False):
-        metrics = ['loss'] + self._models[0].metric_names
-        info = {metric: MetricMatrixAndArray(matrix=np.zeros((self._num_models, len(self._x_split))),
-                                             array=np.zeros((self._num_models, 1))) for metric in metrics}
 
-        if use_test_data:
-            data_iterator = lambda: enumerate(self._test_data)
-        else:
-            data_iterator = lambda: enumerate(zip(self._x_split, self._y_split))
+        def data_iterator():
+            if use_test_data:
+                return itertools.chain(self._partition_test_data, [self._test_data])
+            return itertools.chain(zip(self._x_split, self._y_split), [(self._x, self._y)])
 
-        for i, model in tqdm.tqdm(enumerate(self._models), desc=f'Building metric matrices'):
-            evaluation = model.evaluate(self._x, self._y)
-            for k, metric in enumerate(metrics):
-                info[metric].array[i] = evaluation[k]
+        metrics = ['loss'] + self._partition_models[0].metric_names
 
-            for j, (x_j, y_j) in data_iterator():
-                evaluation_j = model.evaluate(x_j, y_j)
-                for k_j, metric_j in enumerate(metrics):
-                    info[metric_j].matrix[i][j] = evaluation_j[k_j]
+        total_num_models = self._num_partition_models + 1
+        total_num_partitions = self._num_partitions + 1
+        metric_matrix_dim = (total_num_models, total_num_partitions)
+
+        info = {metric: np.zeros(metric_matrix_dim) for metric in metrics}
+
+        for model in progress_bar(self._all_models_iterator(), desc=f'Building metric matrices'):
+            self._fill_metric_info_for_model(model, metrics, data_iterator, info)
 
         return info
+
+    @staticmethod
+    def _fill_metric_info_for_model(model: ModelInterface, metrics, data_iterator, info):
+
+        for partition_iid, (x_partition, y_partition) in enumerate(data_iterator()):
+            evaluation = model.evaluate(x_partition, y_partition)
+            for metric_iid, metric_name in enumerate(metrics):
+                info[metric_name][model.iid][partition_iid] = evaluation[metric_iid]
 
     def _crate_model_config_list_str(self, output_dir):
         output_str = 'model_config_list {\n'
         config_strings = []
-        for model in self._models:
+        for model in self._all_models_iterator():
             name = model.name
             export_path = os.path.join(output_dir, name + '/')
             config_str = '\tconfig {\n' + f'\t\tname: "{name}",\n\t\tbase_path: ' \
@@ -363,7 +412,7 @@ class ModelFactory:
         return output_str
 
     def save_models(self, output_dir, save_format='tf'):
-        for model in self._models:
+        for model in self._all_models_iterator():
             model.save(output_dir, save_format)
 
         model_config_list_str = self._crate_model_config_list_str(output_dir)
@@ -371,23 +420,31 @@ class ModelFactory:
         with open(model_config_fp, 'w') as out_:
             out_.write(model_config_list_str)
 
-    def save_data(self, output_dir):
+    def save_data(self, output_dir, metrics: dict = None):
         def to_float_to_int(x): return [int(float(xi)) for xi in x]
 
         x_name = 'x'
         y_name = 'y'
 
-        data_conf = {'splits': {model.name: {'x': to_float_to_int(x_split), 'y': to_float_to_int(y_split)}
-                                for model, x_split, y_split in
-                                zip(self._models, self._x_split_indices, self._y_split_indices)},
-                     'x_file_name': x_name + '.npy',
-                     'y_file_name': y_name + '.npy',
-                     'model_name_prefix': self._model_name_prefix,
-                     'output_dir': output_dir}
+        splits = {model.name: {'x': to_float_to_int(x_split), 'y': to_float_to_int(y_split)}
+                  for model, x_split, y_split in
+                  zip(self._partition_models, self._x_split_indices, self._y_split_indices)}
+        model_names = [model.name for model in self._all_models_iterator()]
+        model_name_to_iid = {model.name: model.iid for model in self._all_models_iterator()}
+
+        data = {'iid': model_name_to_iid,
+                'model_names': model_names, 'splits': splits, 'model': self._model.name,
+                'x_file_name': x_name + '.npy', 'y_file_name': y_name + '.npy',
+                'model_name_prefix': self._model_name_prefix, 'output_dir': output_dir}
+
+        if metrics is not None:
+            metrics_to_save = {key: value.tolist() for key, value in metrics.items()}
+            data['metrics'] = metrics_to_save
 
         np.save(os.path.join(output_dir, x_name), self._x.astype(np.float64))
         np.save(os.path.join(output_dir, y_name), self._y.astype(np.float64))
 
         data_conf_output_fp = os.path.join(output_dir, 'data.json')
+
         with open(data_conf_output_fp, 'w') as out:
-            json.dump(data_conf, out, sort_keys=True, indent=4)
+            json.dump(data, out, sort_keys=True, indent=4)
