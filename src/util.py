@@ -7,7 +7,17 @@ from sklearn.metrics import mean_squared_error
 import tensorflow as tf
 import tqdm
 
-from typing import Sequence, Tuple
+from typing import Sequence, Tuple, Union
+
+
+def factor_number(number):
+    factors = [i for i in range(1, number+1) if number % i == 0]
+    divisibles = [(factor_i, factor_j, abs(factor_i - factor_j))
+                  for factor_i in factors for factor_j in factors if factor_i * factor_j == number]
+
+    divisibles = sorted(divisibles, key=lambda x: x[-1])
+
+    return divisibles[0][:-1]
 
 
 def plot_heatmap(matrix, title, x_label, y_label, ax=None, heatmap_kwargs: dict = None):
@@ -56,13 +66,16 @@ def temporal_train_val_test(x, val_size: float = .2, test_size: float = .1):
 def temporal_train_val_test2(x, y, val_size: float = .2, test_size: float = .1):
     assert 0 < val_size + test_size < 1
 
-    num_time_series = x.shape[0]
-    permutation = np.random.permutation(num_time_series)
+    num_groups = x.shape[0]
+    permutation = np.random.permutation(num_groups)
     x_permutation = x[permutation, :]
-    y_permutation = y[permutation, :]
+    y_permutation = y[permutation, :]    
 
-    val_ix = num_time_series - int(np.ceil(num_time_series * (val_size + test_size)))
-    test_ix = num_time_series - int(np.ceil(num_time_series * test_size))
+    val_ix = num_groups - int(np.ceil(num_groups * (val_size + test_size)))
+    test_ix = num_groups - int(np.ceil(num_groups * test_size))
+    
+    val_ix = num_groups - int(np.ceil(num_groups * (val_size + test_size)))
+    test_ix = num_groups - int(np.ceil(num_groups * test_size))
 
     x_train = x_permutation[:val_ix]
     y_train = y_permutation[:val_ix]
@@ -99,7 +112,8 @@ def assert_is_fit(f):
 
 class ArraySplitter:
 
-    def __init__(self, array: np.ndarray, num_splits: int, axis: int = 0):
+    def __init__(self, array: np.ndarray, num_splits: Union[int, Tuple[int, int]],
+                 axis: Union[int, Tuple[int, int]]):
         self._array = array
         self._num_splits = num_splits
         self._is_split = False
@@ -107,18 +121,55 @@ class ArraySplitter:
         self._split_indices = None
         self._axis = axis
 
-    def __call__(self) -> Tuple[Sequence[np.ndarray], Tuple[Tuple[int, int], ...]]:
+        self._is_1d_split = isinstance(self._axis, int)
+
+    def __call__(self):
+        self._assert_input()
+
         if not self._is_split:
-            self._split_arrays = np.array_split(self._array, self._num_splits, axis=self._axis)
+            self._split_arrays = self._compute_split()
             self._split_indices = self._compute_split_indices(self._split_arrays)
 
         return self._split_arrays, self._split_indices
 
-    def _compute_split_indices(self, split_arrays: Sequence[np.ndarray]) -> Tuple[Tuple[int, int], ...]:
-        array_lengths = [array.shape[self._axis] for array in split_arrays]
-        last_indices = list(np.cumsum(array_lengths))
-        first_indices = list([0] + last_indices[:-1])
-        return tuple(zip(first_indices, last_indices))
+    def _assert_input(self):
+        def check_int():
+            return isinstance(self._axis, int) and isinstance(self._num_splits, int)
+
+        def check_tuple():
+            return isinstance(self._axis, tuple) and isinstance(self._num_splits, tuple)
+
+        assert check_int() ^ check_tuple(), 'Only 1d (int) and 2d (tuple[int, int]) splits are supported.'
+
+    def _compute_split(self):
+
+        if self._is_1d_split:
+            return np.array_split(self._array, self._num_splits, axis=self._axis)
+
+        horizontal_split = np.array_split(self._array, self._num_splits[1], axis=self._axis[1])
+        concat_horizontal_split = np.concatenate(horizontal_split, axis=self._axis[0])
+        vertical_and_horizontal_split = np.array_split(concat_horizontal_split, np.product(self._num_splits),
+                                                       axis=self._axis[0])
+
+        return vertical_and_horizontal_split
+
+    def _compute_split_indices(self, split_arrays: Sequence[np.ndarray]) -> Sequence[Tuple[int, int]]:
+        def compute_for_axis(axis):
+            array_lengths = [int(array.shape[axis]) for array in split_arrays]
+            last_indices = np.cumsum(array_lengths).tolist()
+            first_indices = list([0] + last_indices[:-1])
+            return first_indices, last_indices
+
+        if self._is_1d_split:
+            split_indices = list(zip(compute_for_axis(self._axis)))
+        else:
+            # Todo: Fix this computation
+            axis_0_first_indices, axis_0_last_indices = compute_for_axis(self._axis[0])
+            axis_1_first_indices, axis_1_last_indices = compute_for_axis(self._axis[1])
+            split_indices = list(zip(axis_0_first_indices, axis_0_last_indices, axis_1_first_indices,
+                                     axis_1_last_indices))
+
+        return split_indices
 
 
 def get_mean_squared_error_matrix(models, x_split, y_split):

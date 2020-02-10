@@ -8,7 +8,7 @@ from src.util import *
 
 from tensorflow.keras.layers import BatchNormalization, ConvLSTM2D, Conv3D
 
-from tqdm.notebook import tqdm as progress_bar
+from tqdm import tqdm as progress_bar
 
 
 class MetricMatrixAndArray:
@@ -277,7 +277,7 @@ class ModelFactory:
 
     def __init__(self, model_class: ClassVar, x: np.ndarray, f_x: Union[Callable, np.ndarray], num_models: int,
                  test_size: float, val_size: float, model_name_prefix: str, f_kwargs: dict = None,
-                 x_split_axis: int = 0, y_split_axis: int = 0,
+                 x_split_axis: int = None, y_split_axis: int = None,
                  model_kwargs: dict = None,
                  train_val_test_splitter: Callable = multidimensional_train_val_test):
 
@@ -295,8 +295,16 @@ class ModelFactory:
         self._test_size = test_size
         self._val_size = val_size
 
-        self._x_splitter = ArraySplitter(self._x, self._num_partitions, axis=x_split_axis)
-        self._y_splitter = ArraySplitter(self._y, self._num_partitions, axis=y_split_axis)
+        if x_split_axis is None:
+            self._x_splitter = ArraySplitter(self._x, self._num_partitions, axis=0)
+            self._y_splitter = ArraySplitter(self._y, self._num_partitions, axis=0)
+        else:
+            assert x_split_axis is not None and y_split_axis is not None, 'You should provide both x_split_axis and ' \
+                                                                          'y_split_axis'
+
+            partitions = factor_number(num_models)
+            self._x_splitter = ArraySplitter(self._x, partitions, axis=x_split_axis)
+            self._y_splitter = ArraySplitter(self._y, partitions, axis=y_split_axis)
 
         self._train_val_test_splitter = train_val_test_splitter
 
@@ -311,7 +319,6 @@ class ModelFactory:
         self._partition_models: List[ModelInterface] = []
         self._model: ModelInterface = None
         self._all_models_iterator = None
-
 
     def _split(self):
         self._x_split, self._x_split_indices = self._x_splitter()
@@ -421,12 +428,11 @@ class ModelFactory:
             out_.write(model_config_list_str)
 
     def save_data(self, output_dir, metrics: dict = None):
-        def to_float_to_int(x): return [int(float(xi)) for xi in x]
 
         x_name = 'x'
         y_name = 'y'
 
-        splits = {model.name: {'x': to_float_to_int(x_split), 'y': to_float_to_int(y_split)}
+        splits = {model.name: {'x': x_split, 'y': y_split}
                   for model, x_split, y_split in
                   zip(self._partition_models, self._x_split_indices, self._y_split_indices)}
         model_names = [model.name for model in self._all_models_iterator()]
