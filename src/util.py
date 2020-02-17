@@ -10,6 +10,14 @@ import tqdm
 from typing import Sequence, Tuple, Union
 
 
+def read_numpy_array_from_disk(file_path: str) -> np.ndarray:
+    return np.load(file_path)
+
+
+def export_numpy_array_to_c_array(array: np.ndarray, c_data_type, file_path: str):
+    array.astype(c_data_type).tofile(file_path)
+
+
 def factor_number(number):
     factors = [i for i in range(1, number+1) if number % i == 0]
     divisibles = [(factor_i, factor_j, abs(factor_i - factor_j))
